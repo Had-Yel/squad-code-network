@@ -47,8 +47,8 @@ try { build(); } catch (err) { say(`falha no build inicial: ${err.message}`); pr
 start();
 watch(SRC, (_event, file) => { if (file && /\.(js|css|html)$/.test(file)) rebuild(); });
 const restartSoon = debounce(restart, 200);
-for (const file of ['server.js', 'db.js']) watch(path.join(ROOT, file), restartSoon);
-say('observando src/, server.js e db.js. Ctrl+C para sair.');
+for (const file of ['server.js', 'db.js', 'codex-adapter.js']) watch(path.join(ROOT, file), restartSoon);
+say('observando src/, server.js, db.js e codex-adapter.js. Ctrl+C para sair.');
 
 const stop = () => { if (server) server.kill(); process.exit(0); };
 process.on('SIGINT', stop);

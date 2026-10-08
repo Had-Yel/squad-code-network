@@ -2,17 +2,22 @@
   "name": "squad-code-network",
   "version": "2.1.0",
   "private": true,
-  "description": "SQUAD/CODE: rede de agentes de desenvolvimento executados com Claude Code (claude -p) via bridge local.",
+  "description": "SQUAD/CODE: rede de agentes com OpenAI Codex CLI, bridge local e SQLite.",
   "scripts": {
     "start": "node server.js",
     "dev": "node scripts/dev.mjs",
-    "build": "python build.py",
-    "test": "node --test tests/bridge.test.mjs"
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/bridge.test.mjs tests/codex-adapter.test.mjs",
+    "test:ui": "node --test tests/ui.test.mjs"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "^13.0.3",
+    "smol-toml": "^1.9.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.0"
   }
 }
