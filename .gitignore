@@ -26,3 +26,7 @@ Thumbs.db
 
 # Workspace salvo pelo bridge (data/workspace.json, backups)
 data/
+
+# Credenciais e preferências Codex locais
+.codex/auth.json
+.codex/squad.local.toml

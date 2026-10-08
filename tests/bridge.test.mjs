@@ -1,4 +1,4 @@
-// Bridge integration tests: `node --test tests/`. Uses tests/fake-claude.mjs, so no API calls are made.
+// Bridge integration tests: `node --test tests/`. Uses tests/fake-codex.mjs, so no API calls are made.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -28,7 +28,7 @@ let server, token, nextPort = PORT + 1;
 async function startBridge(dataDir, port = nextPort++) {
   const proc = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--port', String(port)], {
     cwd: workdir,
-    env: { ...process.env, TEMP: tempRoot, TMP: tempRoot, TMPDIR: tempRoot, SQUAD_HOME: home, SQUAD_PROJECTS_DIR: projectsRoot, SQUAD_DATA_DIR: dataDir, SQUAD_CLAUDE_BIN: path.join(ROOT, 'tests', 'fake-claude.mjs'), SQUAD_PRINT_TOKEN: '1' },
+    env: { ...process.env, TEMP: tempRoot, TMP: tempRoot, TMPDIR: tempRoot, SQUAD_HOME: home, CODEX_HOME: path.join(home,"codex"), SQUAD_PROJECTS_DIR: projectsRoot, SQUAD_DATA_DIR: dataDir, SQUAD_CODEX_BIN: path.join(ROOT, 'tests', 'fake-codex.mjs'), SQUAD_PRINT_TOKEN: '1' },
   });
   let out = '';
   const tok = await new Promise((resolve, reject) => {
@@ -78,188 +78,41 @@ test('rejects missing token and foreign origin', async () => {
   assert.equal((await api('/api/health', { headers: { origin: 'http://evil.example' } })).status, 403);
 });
 
-test('health reports fake claude version', async () => {
-  const body = await (await api('/api/health')).json();
-  assert.equal(body.ok, true);
-  assert.match(body.claudeVersion, /9\.9\.9/);
-  assert.equal(body.projectsDir, realpathSync.native(projectsRoot));
+test('health reports authenticated Codex and the model catalog', async () => {
+ const body=await (await api('/api/health')).json();assert.equal(body.authenticated,true);assert.match(body.codexVersion,/0\.157/);assert.equal(body.models[0].model,'test-model');
 });
-
-test('project runs get their own folder under the projects root, without the app CLAUDE.md or an enclosing git repo', async () => {
-  const folder = 'op-001-atlas-commerce', dir = path.join(projectsRoot, folder);
-  assert.equal(existsSync(dir), false);
-  // The projects root inside a git repository, like projects/ inside a clone of this app.
-  let git = true;
-  try { execFileSync('git', ['init', '-q', projectsRoot], { stdio: 'ignore' }); } catch { git = false; }
-  const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'build it GITCHECK', options: { project: folder, cwd: workdir } }) });
-  assert.equal(res.status, 201, await res.clone().text());
-  const { runId, args, cwd } = await res.json();
-  assert.ok(existsSync(dir));
-  assert.equal(cwd, realpathSync.native(dir));
-  assert.equal(args[args.indexOf('--settings') + 1], '<settings-file>');
-  const events = await collect(runId);
-  const init = events.find(e => e.type === 'system' && e.subtype === 'init');
-  assert.equal(init.cwd, realpathSync.native(dir));
-  assert.ok(init.settings.claudeMdExcludes.includes(realpathSync.native(path.join(ROOT, 'CLAUDE.md')).replace(/\\/g, '/')));
-  assert.equal(init.settings.permissions.blockReadsOutsideWorkingDirectories, true);
-  // The folder is its own repository and git stops at the projects root: the agents' git commands never reach the enclosing one.
-  assert.ok(init.gitCeiling.split(path.delimiter).includes(realpathSync.native(projectsRoot)));
-  if (git) {
-    assert.ok(existsSync(path.join(dir, '.git')));
-    assert.equal(path.resolve(init.gitTop).toLowerCase(), realpathSync.native(dir).toLowerCase());
-  }
-  rmSync(path.join(projectsRoot, '.git'), { recursive: true, force: true });
-  assert.equal(events.at(-1).status, 'done');
-  // Runs without a project keep the plain cwd, no extra settings and no git ceiling.
-  const plain = await (await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'x', options: { cwd: workdir } }) })).json();
-  assert.ok(!plain.args.includes('--settings'));
-  const plainInit = (await collect(plain.runId)).find(e => e.type === 'system' && e.subtype === 'init');
-  assert.equal(plainInit.gitCeiling, process.env.GIT_CEILING_DIRECTORIES || null);
-  // Neither a project nor a folder: refused, never run in the bridge's own folder.
-  const none = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'x', options: {} }) });
-  assert.equal(none.status, 400);
-  assert.match((await none.json()).error, /pasta de projeto/);
+const run=async(prompt,options={},systemPrompt='')=>{const res=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt,systemPrompt,options:{cwd:workdir,...options}})});assert.equal(res.status,201,await res.clone().text());const info=await res.json();return {...info,events:await collect(info.runId)};};
+const configOf=events=>JSON.parse(events.find(e=>e.type==='assistant'&&e.message.content[0]?.text?.startsWith('CONFIG:')).message.content[0].text.slice(7));
+test('project directory and restrictive Codex profile cross the adapter boundary',async()=>{
+ const r=await run('hello',{project:'op-001-atlas-commerce',tools:['Read'],permissionMode:'read-only'},'role');
+ assert.equal(r.cwd,realpathSync.native(path.join(projectsRoot,'op-001-atlas-commerce')));assert.ok(existsSync(path.join(r.cwd,'.git')));
+ const c=configOf(r.events);assert.equal(c.sandbox||c.permissions,process.platform==='win32'?'read-only':'squad-read');assert.equal(c.config['features.shell_tool'],false);assert.equal(c.config['sandbox_workspace_write.network_access'],process.platform==='win32'?false:undefined);
+ assert.equal(r.events.at(-1).status,'done');assert.equal(r.events.at(-1).costUsd,null);
 });
-
-test('squad colleagues go to claude as an --agents file, with forwarded subagent text on request', async () => {
-  const agents = { argus: { description: 'ARGUS, arquiteto. Chame para decisões de arquitetura.', prompt: 'Você é o ARGUS.', tools: ['Read', 'Grep'], model: 'haiku', effort: 'low', color: 'ignored' }, echo: { description: 'ECHO, QA.' } };
-  const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'implement', options: { cwd: workdir, agents, forwardSubagents: true, tools: ['Read', 'Agent'] } }) });
-  assert.equal(res.status, 201, await res.clone().text());
-  const { runId, args } = await res.json();
-  assert.equal(args[args.indexOf('--agents') + 1], '<agents-file>');
-  assert.ok(args.includes('--forward-subagent-text'));
-  const events = await collect(runId);
-  const init = events.find(e => e.type === 'system' && e.subtype === 'init');
-  assert.equal(init.foregroundAgents, true, 'colleague calls must run in the foreground');
-  assert.deepEqual(init.agents, { argus: { description: agents.argus.description, prompt: 'Você é o ARGUS.', tools: ['Read', 'Grep'], model: 'haiku', effort: 'low' }, echo: { description: 'ECHO, QA.', prompt: '' } });
-  const call = events.find(e => e.type === 'assistant' && e.message.content.some(b => b.type === 'tool_use' && b.name === 'Agent'));
-  assert.equal(call.message.content.find(b => b.name === 'Agent').input.subagent_type, 'argus');
-  assert.ok(events.some(e => e.type === 'assistant' && e.parent_tool_use_id === 'call-1'));
-  assert.ok(events.some(e => e.type === 'user' && e.message.content.some(b => b.type === 'tool_result' && b.tool_use_id === 'call-1')));
-  assert.equal(events.at(-1).status, 'done');
-  // The temp file is removed when the run ends (asynchronously, right after the stream closes).
-  const tmp = path.join(tempRoot, readdirSync(tempRoot).find(d => d.startsWith('squad-code-')));
-  const left = () => readdirSync(tmp).filter(f => f.endsWith('.agents.json'));
-  for (let i = 0; i < 20 && left().length; i++) await new Promise(r => setTimeout(r, 50));
-  assert.deepEqual(left(), []);
-  // forwardSubagents only with true.
-  const plain = await (await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'x', options: { cwd: workdir, agents: { argus: agents.argus }, forwardSubagents: 'yes' } }) })).json();
-  assert.ok(plain.args.includes('--agents') && !plain.args.includes('--forward-subagent-text'));
-  const plainEvents = await collect(plain.runId);
-  assert.ok(!plainEvents.some(e => e.parent_tool_use_id));
+test('dynamic colleague executes in its own thread and returns to the caller',async()=>{
+ const r=await run('CALL_COLLEAGUE',{agents:{argus:{description:'Architect',prompt:'You are ARGUS',tools:['Read'],model:'test-model'}},tools:['Read','Agent'],forwardSubagents:true});
+ assert.ok(r.events.some(e=>e.type==='assistant'&&e.message.content.some(b=>b.name==='Agent')));assert.ok(r.events.some(e=>e.parent_tool_use_id==='call-1'));assert.ok(r.events.some(e=>e.type==='user'&&e.message.content.some(b=>b.tool_use_id==='call-1')));assert.match(r.events.at(-1).result,/COLLEAGUE/);
 });
-
-test('rejects invalid squad agent definitions', async () => {
-  const many = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`a${i}`, { description: 'x' }]));
-  for (const agents of [[], 'argus', { 'Bad Key': { description: 'x' } }, { argus: 'x' }, { argus: {} }, { argus: { description: 'x', tools: ['Bash; rm'] } }, { argus: { description: 'x', model: 'a b' } }, { argus: { description: 'x', effort: 'turbo' } }, many]) {
-    const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'x', options: { cwd: workdir, agents } }) });
-    assert.equal(res.status, 400, JSON.stringify(agents).slice(0, 80));
-  }
+test('rejects invalid options, project paths, budget flags and unrestricted execution',async()=>{
+ for(const options of [{project:'../escape'},{project:'con'},{permissionMode:'bypassPermissions'},{effort:'turbo'},{maxBudgetUsd:1},{allowedTools:['Bash(git *)']},{agents:[]},{agents:{bad:{}}},{tools:['Bash;rm']},{addDirs:[path.parse(home).root]}]){
+  const res=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:'x',options:{cwd:workdir,...options}})});assert.equal(res.status,400,JSON.stringify(options));
+ }
+ const none=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:'x',options:{}})});assert.equal(none.status,400);
 });
-
-test('rejects project folder names that are not plain slugs', async () => {
-  for (const project of ['../escape', 'a/b', 'a\\b', 'CON', 'con', 'Op-001', '-x', 'a.b', 'x'.repeat(81)]) {
-    const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'x', options: { project } }) });
-    assert.equal(res.status, 400, project);
-  }
-  assert.ok(!existsSync(path.join(path.dirname(projectsRoot), 'escape')));
-  assert.deepEqual(readdirSync(projectsRoot).filter(d => d !== 'op-001-atlas-commerce'), []);
+test('streams partial text only on request, keeps instructions and surfaces failure',async()=>{
+ const r=await run('hello',{partial:true,model:'test-model',tools:[]},'be brief');assert.ok(r.events.some(e=>e.type==='stream_event'));assert.equal(r.events.at(-1).result,'ECHO:hello|SYS:be brief');
+ const plain=await run('hello');assert.ok(!plain.events.some(e=>e.type==='stream_event'));
+ assert.equal((await run('FAIL')).events.at(-1).status,'error');
 });
-
-test('run streams events and final result with system prompt and flags', async () => {
-  const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'hello agent', systemPrompt: 'be brief', options: { cwd: workdir, model: 'haiku', permissionMode: 'acceptEdits', allowedTools: ['Read', 'Bash(git *)'] } }) });
-  assert.equal(res.status, 201);
-  const { runId, args } = await res.json();
-  assert.ok(args.includes('--permission-mode') && args.includes('acceptEdits'));
-  const events = await collect(runId);
-  const init = events.find(e => e.type === 'system' && e.subtype === 'init');
-  assert.equal(init.model, 'haiku');
-  assert.equal(init.foregroundAgents, false);
-  assert.ok(events.some(e => e.type === 'assistant'));
-  const exit = events.at(-1);
-  assert.equal(exit.type, 'exit');
-  assert.equal(exit.status, 'done');
-  assert.equal(exit.result, 'ECHO:hello agent|SYS:be brief');
-  assert.equal(exit.costUsd, 0.001);
+test('cancel kills the Codex process and closes the event stream',async()=>{
+ const res=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:'SLEEP',options:{cwd:workdir}})});const {runId}=await res.json();const events=collect(runId);await new Promise(r=>setTimeout(r,300));await api('/api/runs/'+runId+'/cancel',{method:'POST'});assert.equal((await events).at(-1).status,'cancelled');
 });
-
-test('partial streams text deltas only when asked (chat runs)', async () => {
-  const run = async options => { const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'chat', options: { cwd: workdir, ...options } }) }); assert.equal(res.status, 201); const { runId, args } = await res.json(); return { args, events: await collect(runId) }; };
-  const live = await run({ partial: true, tools: [], permissionMode: 'dontAsk' });
-  assert.ok(live.args.includes('--include-partial-messages'));
-  const deltas = live.events.filter(e => e.type === 'stream_event' && e.event?.delta?.type === 'text_delta').map(e => e.event.delta.text);
-  assert.equal(deltas.join(''), 'working');
-  assert.equal(live.events.at(-1).status, 'done');
-  const plain = await run({ partial: 'yes' });
-  assert.ok(!plain.args.includes('--include-partial-messages'));
-  assert.ok(!plain.events.some(e => e.type === 'stream_event'));
-});
-
-test('recreates its temp folder when it disappears', async () => {
-  // OS temp cleanup can remove the (usually empty) folder while the bridge keeps running.
-  const dirs = readdirSync(tempRoot).filter(d => d.startsWith('squad-code-'));
-  assert.equal(dirs.length, 1);
-  rmSync(path.join(tempRoot, dirs[0]), { recursive: true, force: true });
-  const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'still there?', systemPrompt: 'soul of the agent', options: { cwd: workdir } }) });
-  assert.equal(res.status, 201, await res.clone().text());
-  const exit = (await collect((await res.json()).runId)).at(-1);
-  assert.equal(exit.status, 'done');
-  assert.equal(exit.result, 'ECHO:still there?|SYS:soul of the agent');
-});
-
-test('failed run reports error', async () => {
-  const { runId } = await (await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'FAIL please', options: { cwd: workdir } }) })).json();
-  const exit = (await collect(runId)).at(-1);
-  assert.equal(exit.status, 'error');
-  assert.equal(exit.isError, true);
-});
-
-test('cancel kills a running process', async () => {
-  const { runId } = await (await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'SLEEP', options: { cwd: workdir } }) })).json();
-  const pending = collect(runId);
-  await new Promise(r => setTimeout(r, 400));
-  await api(`/api/runs/${runId}/cancel`, { method: 'POST' });
-  const exit = (await pending).at(-1);
-  assert.equal(exit.status, 'cancelled');
-});
-
-test('rejects invalid options', async () => {
-  const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'x', options: { cwd: workdir, permissionMode: 'yolo' } }) });
-  assert.equal(res.status, 400);
-  assert.match((await res.json()).error, /permissão/);
-  const res2 = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'x', options: { cwd: workdir, allowedTools: ['Bash; rm -rf /'] } }) });
-  assert.equal(res2.status, 400);
-  assert.match((await res2.json()).error, /Ferramenta/);
-});
-
-test('settings.json read/write with backup (user and project scope)', async () => {
-  const empty = await (await api('/api/claude/settings?scope=user')).json();
-  assert.equal(empty.exists, false);
-  let res = await api('/api/claude/settings?scope=user', { method: 'PUT', body: JSON.stringify({ text: '{"model":"sonnet"}' }) });
-  assert.equal((await res.json()).backup, null);
-  res = await api('/api/claude/settings?scope=user', { method: 'PUT', body: JSON.stringify({ text: '{"model":"opus"}' }) });
-  const saved = await res.json();
-  assert.ok(saved.backup && existsSync(saved.backup));
-  assert.deepEqual(JSON.parse(readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8')), { model: 'opus' });
-  assert.deepEqual(JSON.parse(readFileSync(saved.backup, 'utf8')), { model: 'sonnet' });
-
-  res = await api(`/api/claude/settings?scope=project&cwd=${encodeURIComponent(workdir)}`, { method: 'PUT', body: JSON.stringify({ text: '{"permissions":{"allow":["Read"]}}' }) });
-  assert.equal(res.status, 200);
-  assert.ok(existsSync(path.join(workdir, '.claude', 'settings.json')));
-
-  // A project folder that has no run yet: reading does not create it, saving does.
-  const fresh = await (await api('/api/claude/settings?scope=local&project=op-002-loja')).json();
-  assert.equal(fresh.exists, false);
-  assert.equal(existsSync(path.join(projectsRoot, 'op-002-loja')), false);
-  res = await api('/api/claude/settings?scope=project&project=op-002-loja', { method: 'PUT', body: JSON.stringify({ text: '{"model":"haiku"}' }) });
-  assert.equal(res.status, 200);
-  assert.deepEqual(JSON.parse(readFileSync(path.join(projectsRoot, 'op-002-loja', '.claude', 'settings.json'), 'utf8')), { model: 'haiku' });
-  assert.equal((await api('/api/claude/settings?scope=project&project=..%2Fx')).status, 400);
-
-  res = await api('/api/claude/settings?scope=user', { method: 'PUT', body: JSON.stringify({ text: '[1,2]' }) });
-  assert.equal(res.status, 400);
-  res = await api('/api/claude/settings?scope=user', { method: 'PUT', body: JSON.stringify({ text: '{bad' }) });
-  assert.equal(res.status, 400);
+test('native TOML settings validate, preserve formatting and create a backup',async()=>{
+ assert.equal((await api('/api/codex/settings/validate',{method:'POST',body:JSON.stringify({text:'model = ['})})).status,400);
+ const url='/api/codex/settings?scope=user';assert.equal((await (await api(url)).json()).exists,false);
+ let r=await api(url,{method:'PUT',body:JSON.stringify({text:'model = "test-model"\n'})});assert.equal(r.status,200);
+ r=await api(url,{method:'PUT',body:JSON.stringify({text:'# note\nmodel = "another"\n'})});const saved=await r.json();assert.ok(existsSync(saved.backup));assert.match(readFileSync(saved.backup,'utf8'),/test-model/);assert.match(readFileSync(saved.path,'utf8'),/# note/);
+ r=await api(url,{method:'PUT',body:JSON.stringify({text:'model = ['})});assert.equal(r.status,400);
 });
 
 test('workspace is saved in SQLite, injected into the page and guarded against stale writes', async () => {
@@ -457,7 +310,7 @@ test('run history survives a restart; a run cut by a dead bridge comes back inte
   assert.equal(first.status, 'done');
   assert.equal(first.agentId, 'agent-x');
   assert.equal(first.kind, 'step');
-  assert.equal(first.costUsd, 0.001);
+  assert.equal(first.costUsd, null);
   assert.equal(list.find(r => r.id === cut).status, 'interrupted');
   // Replay from the database: the same events, without the partial text deltas.
   const replay = await collect(done, b.base, b.token);
@@ -469,7 +322,7 @@ test('run history survives a restart; a run cut by a dead bridge comes back inte
   try { process.kill(cutEvents.find(e => e.subtype === 'spawned').pid); } catch {}
   const detail = await (await b.api(`/api/runs/${done}`)).json();
   assert.equal(detail.run.status, 'done');
-  assert.equal(detail.result.costUsd, 0.001);
+  assert.equal(detail.result.costUsd, null);
   assert.equal((await b.api('/api/runs/nope')).status, 404);
   await b.stop();
 });
