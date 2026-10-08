@@ -32,5 +32,5 @@
 - Concluído: localização, normas, clone/remotes/branch, análise, instalação, adaptador, ajustes operacionais, documentação e 19 testes de backend.
 - Validação real concluída: escrita/leitura + SSE; comandante → revisor → comandante; cancelamento; histórico SQLite com três execuções. Evidências em [LOG.md](LOG.md).
 - Integração na interface verificada em Chromium: inicialização, configuração/modelos, TOML, exportação, SSE e console. A plataforma já foi validada pelo operador; sem revalidação ampla.
-- Em conclusão: revisão final, commits e publicação da branch/PR no fork.
-- Limitações conhecidas acima permanecem explícitas. O PR não será mesclado automaticamente.
+- Publicado: branch `codex/openai-codex-migration` no fork; [PR #1](https://github.com/Had-Yel/squad-code-network/pull/1) para `main`, em rascunho para revisão das limitações do sandbox. Implementação e documentação versionadas em commits separados.
+- Próxima etapa, se autorizada: revisar o PR e decidir sobre merge. Sem bloqueio para experimentar a integração no ambiente Windows validado; isolamento completo de leitura com terminal e ensaio Linux/macOS permanecem pendentes. Nenhum merge automático.

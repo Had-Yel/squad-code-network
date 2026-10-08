@@ -27,3 +27,6 @@
 ## 2026-10-08 — versionamento
 - Commit técnico `48b41516bfb774d58b1efccca87267253ff7e0af`: execução nativa Codex, integração na interface, build e testes específicos do adaptador.
 - Documentação operacional, master, checkpoint e log reunidos em commit separado. Branch principal preservada; publicação destinada exclusivamente ao fork Had-Yel.
+- Commit documental `15fe65acd7fffcb27618a89abba479e3634b589a`; push da branch `codex/openai-codex-migration` concluído em `origin`.
+- [PR #1](https://github.com/Had-Yel/squad-code-network/pull/1) criado em rascunho, base `Had-Yel/squad-code-network:main`, com evidências e limitações explícitas. Sem merge e sem escrita no upstream.
+- Master, checkpoint e índice pessoal atualizados com o PR. Revisão de limites de leitura no Windows e ensaio Linux/macOS ficam registrados para evolução posterior; nenhuma ampliação do escopo nesta entrega.
